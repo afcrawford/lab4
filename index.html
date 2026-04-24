@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Markov Groove System (Fixed Tempo)</title>
+  <style>
+    body { background: black; color: white; text-align: center; font-family: sans-serif; }
+    canvas { border: 1px solid white; margin-top: 10px; }
+  </style>
+</head>
+<body>
+
+<h2>Daft Punk-style Markov Chain Generator</h2>
+
+<button id="play">Play</button>
+<button id="stop">Stop</button>
+<button id="build">Build</button>
+<button id="drop">Drop</button>
+<button id="regen">New Melody</button>
+
+<canvas id="viz" width="600" height="240"></canvas>
+
+<script>
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+let ctx = new AudioContext();
+
+let mode = "drop";
+let step = 0;
+let running = false;
+
+const BPM = 140;
+const stepTime = 60 / BPM / 2; // 8th notes
+const SWING = 0.02;
+
+
+const analyser = ctx.createAnalyser();
+
+const master = ctx.createGain();
+master.gain.value = 0.45;
+
+const limiter = ctx.createDynamicsCompressor();
+limiter.threshold.value = -12;
+limiter.ratio.value = 10;
+
+master.connect(limiter);
+limiter.connect(analyser);
+analyser.connect(ctx.destination);
+
+// markov
+const melodyData = [
+  60, 60, 67, 69, 67, 64, 62, 60,
+  60, 67, 69, 72, 71, 69, 67, 65,
+  64, 65, 67, 69, 67, 64, 62, 60,
+  67, 69, 71, 72, 74, 72, 71, 69,
+  60, 64, 67, 72, 67, 64, 62, 60,
+  60, 62, 64, 65, 67, 65, 64, 62
+];
+
+function weightedRandom(options) {
+  // simple smoothing: avoids overfitting
+  let expanded = [];
+
+  for (let i = 0; i < options.length; i++) {
+    let weight = 1;
+
+    // slight preference for stability
+    if (i > 0 && options[i] === options[i - 1]) {
+      weight = 2;
+    }
+
+    for (let j = 0; j < weight; j++) {
+      expanded.push(options[i]);
+    }
+  }
+
+  return expanded[Math.floor(Math.random() * expanded.length)];
+}
+
+function buildMarkov(seq, order) {
+  let chain = {};
+  for (let i = 0; i < seq.length - order; i++) {
+    let key = seq.slice(i, i + order).join(",");
+    let next = seq[i + order];
+    if (!chain[key]) chain[key] = [];
+    chain[key].push(next);
+  }
+  return chain;
+}
+
+function generateMarkov(chain, order, length) {
+  let keys = Object.keys(chain);
+  let current = keys[Math.floor(Math.random() * keys.length)]
+    .split(",").map(Number);
+
+  let result = [...current];
+
+  for (let i = 0; i < length; i++) {
+    let options = chain[current.join(",")];
+    if (!options) break;
+
+    let next = weightedRandom(options);
+
+    // still audible but not chaotic
+    if (Math.random() < 0.2) next += 12;
+    if (Math.random() < 0.1) next -= 12;
+
+    if (Math.random() < 0.08) next = null;
+
+    result.push(next);
+
+    current.shift();
+    current.push(next || 60);
+  }
+
+  return result;
+}
+
+let chain = buildMarkov(melodyData, 2);
+let melody = generateMarkov(chain, 2, 16);
+
+// helpers
+function midiToFreq(n) {
+  return Math.min(1000, 440 * Math.pow(2, (n - 69) / 12));
+}
+
+// lead
+function playLead(note, time, cutoff) {
+  if (note === null) return;
+
+  let osc = ctx.createOscillator();
+  let filter = ctx.createBiquadFilter();
+  let gain = ctx.createGain();
+
+  osc.type = "sawtooth";
+  osc.frequency.value = midiToFreq(note);
+
+  filter.type = "lowpass";
+  filter.frequency.setValueAtTime(cutoff, time);
+  filter.frequency.linearRampToValueAtTime(cutoff + 800, time + stepTime);
+
+  gain.gain.setValueAtTime(0, time);
+  gain.gain.linearRampToValueAtTime(0.1, time + 0.01);
+  gain.gain.linearRampToValueAtTime(0, time + stepTime * 1.2);
+
+  osc.connect(filter);
+  filter.connect(gain);
+  gain.connect(master);
+
+  osc.start(time);
+  osc.stop(time + stepTime * 1.2);
+}
+
+// markov
+function playMarkovVoice(note, time) {
+  if (note === null) return;
+
+  let osc = ctx.createOscillator();
+  let gain = ctx.createGain();
+
+  osc.type = "triangle";
+  osc.frequency.value = midiToFreq(note);
+
+  gain.gain.setValueAtTime(0.18, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + stepTime);
+
+  osc.connect(gain);
+  gain.connect(master);
+
+  osc.start(time);
+  osc.stop(time + stepTime);
+}
+
+// drums
+function kick(time) {
+  let osc = ctx.createOscillator();
+  let gain = ctx.createGain();
+
+  osc.frequency.setValueAtTime(150, time);
+  osc.frequency.exponentialRampToValueAtTime(50, time + 0.1);
+
+  gain.gain.setValueAtTime(0.7, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.1);
+
+  osc.connect(gain);
+  gain.connect(master);
+
+  osc.start(time);
+  osc.stop(time + 0.1);
+}
+
+function hihat(time) {
+  let buffer = ctx.createBuffer(1, 44100, 44100);
+  let data = buffer.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random()*2-1;
+
+  let noise = ctx.createBufferSource();
+  noise.buffer = buffer;
+
+  let gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.08, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
+
+  noise.connect(gain);
+  gain.connect(master);
+
+  noise.start(time);
+  noise.stop(time + 0.05);
+}
+
+// loop
+function scheduler() {
+  if (!running) return;
+
+  let now = ctx.currentTime;
+
+  for (let i = 0; i < 4; i++) {
+
+    let swing = (i % 2 === 1) ? SWING : 0;
+    let t = now + i * stepTime + swing;
+
+    let note = melody[(step + i) % melody.length];
+
+    let cutoff = (mode === "build")
+      ? 300 + (step % 32) * 60 // slow rising filter (VERY audible build)
+      : 1000;
+
+    playLead(note, t, cutoff);
+    playMarkovVoice(note, t);
+
+    if (mode === "drop") {
+      if ((step + i) % 2 === 0) kick(t);
+    }
+
+    if (mode === "build") {
+      if ((step + i) % 2 === 0) hihat(t);
+    } else {
+      if ((step + i) % 2 === 0) hihat(t);
+    }
+  }
+
+  step += 4;
+
+  setTimeout(scheduler, stepTime * 1000 * 4);
+}
+
+// visualization
+const canvas = document.getElementById("viz");
+const c = canvas.getContext("2d");
+
+function draw() {
+  requestAnimationFrame(draw);
+
+  let data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteTimeDomainData(data);
+
+  c.fillStyle = "black";
+  c.fillRect(0,0,canvas.width,canvas.height);
+
+  c.beginPath();
+  for (let i=0;i<data.length;i++){
+    let x=(i/data.length)*canvas.width;
+    let y=(data[i]/255)*canvas.height;
+    i===0?c.moveTo(x,y):c.lineTo(x,y);
+  }
+
+  c.strokeStyle="lime";
+  c.stroke();
+
+  c.fillStyle="white";
+  c.fillText("MODE: " + mode, 10, 20);
+  c.fillText("MARKOV ACTIVE", 10, 40);
+}
+draw();
+
+// controls
+document.getElementById("play").onclick = () => {
+  ctx.resume();
+  if (!running) {
+    running = true;
+    scheduler();
+  }
+};
+
+document.getElementById("stop").onclick = () => {
+  running = false;
+};
+
+document.getElementById("build").onclick = () => {
+  mode = "build";
+};
+
+document.getElementById("drop").onclick = () => {
+  mode = "drop";
+};
+
+document.getElementById("regen").onclick = () => {
+  melody = generateMarkov(chain, 2, 16);
+};
+
+</script>
+</body>
+</html>
