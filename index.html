@@ -1,24 +1,104 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Markov Groove System (Fixed Tempo)</title>
+  <title>Daft Punk Markov System</title>
   <style>
     body { background: black; color: white; text-align: center; font-family: sans-serif; }
     canvas { border: 1px solid white; margin-top: 10px; }
+    textarea { margin-top: 10px; }
   </style>
 </head>
 <body>
 
-<h2>Daft Punk-style Markov Chain Generator</h2>
+<h2>Daft Punk Style Markov Chain Generator</h2>
 
 <button id="play">Play</button>
 <button id="stop">Stop</button>
 <button id="build">Build</button>
 <button id="drop">Drop</button>
-<button id="regen">New Melody</button>
+<button id="regen">Generate</button>
+
+<br><br>
+
+<label>Markov Order:
+  <input type="number" id="orderInput" min="1" max="6" value="2">
+</label>
+
+<br><br>
+
+<label>Input Mode:</label>
+<select id="inputMode">
+  <option value="text">Text Input</option>
+  <option value="midi">MIDI Upload</option>
+</select>
+
+<div id="textInputArea">
+  <textarea id="inputNotes" rows="3" cols="50">
+60 60 67 69 67 64 62 60
+  </textarea>
+  <br>
+  <button id="learn">Train from text!</button>
+</div>
+
+<div id="midiInputArea" style="display:none;">
+  <input type="file" id="midiFile" accept=".mid,.midi">
+  <p>Upload MIDI to train model</p>
+</div>
 
 <canvas id="viz" width="600" height="240"></canvas>
 
+<!--blog post-->
+<h3>Daft Punk Inspired Markov Chain Music Generator</h3>
+<br>
+<p>
+  This project is a Markov chain generator that supports both text inputs of notes
+  and MIDI file uploads. There is a selection to toggle which input the user wishes to use, whether it be
+  user-inputted notes or MIDI pitches.
+  and when the text input is used there are some notes automatically filled in for the user
+  to start with and alter as they wish.
+</p><br>
+<p>
+  There are three stages in this work: the input processing, the Markov chain learning stage, and sequence generation stage.
+  When the text input is selected and the train button is clicked, the Markov will
+  parse through and train on the notes in the text box. 
+  When the MIDI option is selected and a file is uploaded, the file will automatically
+  process the MIDI file and train based on the file. These inputs are transformed into pitch sequences to use for training.
+</p><br>
+<p>
+  Once trained on either input type, the Markov chain is used as a probabilistic model to generate notes based on the previous n notes in the sequence. 
+  The user selects the order that they want the Markov chain to be (1-6), 
+  and the chain is generated based on this order and the trained chain. The lower order chains lead to more variability but less coherence and structure.
+</p>
+<br>
+<p>
+  Additionally, there are other options to enhance the generated music. I was inspired
+  by Daft Punk style music, so I added "build" and "drop" functions and drums in the background to follow EDM-style music.
+  The build function creates a gradually changing low pass filter and removes some of the drum sounds, and the 
+  drop function goes back to the original output. The "generate" button creates a new generated chain
+  based on the trained chain. 
+</p>
+<br>
+<p>
+  This project really helped me to understand Markov chains, and how the chains capture probabilities rather than structure for an entire song. 
+  The lecture on algorithmic composition
+  in class was already very interesting, but being able to create the training and generation functions
+  themselves was very interesting and helped me to understand how the selected order affects the generation.
+  Implementing the MIDI upload was also very interesting, as I uploaded files of different songs I like and got to
+  see how the MIDI processing interpreted them. Getting to hear the generation sometimes sound similar to the original files
+  was very rewarding as well. However, there were moments when the songs I used were instrument-heavy and weren't interpreted well.
+  I would like to work on extending this MIDI interpretation and generation to make these songs sound even more like the originals
+  and more Daft Punk-like, especially when they had a lot of different components that got muddled in training.
+</p>
+<br>
+<p>A potential limitation of my work would be no musicality constraints on output. The "generate" button helps to find a chain
+  that sounds nice, but there are no constraints on song structure to follow music theory since pitch notes are treated individually. This randomness combined with the drums and ability
+  to input any order of notes in the text box, this sometimes leads to music generations that are less enjoyable to listen to.
+  Implementing more structural guidelines could lead to more enjoyable music every run through.
+</p>
+
+
+
+<script src="https://cdn.jsdelivr.net/npm/@tonejs/midi"></script>
 <script>
 const AudioContext = window.AudioContext || window.webkitAudioContext;
 let ctx = new AudioContext();
@@ -26,14 +106,14 @@ let ctx = new AudioContext();
 let mode = "drop";
 let step = 0;
 let running = false;
+let ORDER = 2;
 
-const BPM = 140;
-const stepTime = 60 / BPM / 2; // 8th notes
+const BPM = 120;
+const stepTime = 60 / BPM / 2;
 const SWING = 0.02;
 
-
+// AUDIO
 const analyser = ctx.createAnalyser();
-
 const master = ctx.createGain();
 master.gain.value = 0.45;
 
@@ -45,33 +125,15 @@ master.connect(limiter);
 limiter.connect(analyser);
 analyser.connect(ctx.destination);
 
+
 // markov
-const melodyData = [
-  60, 60, 67, 69, 67, 64, 62, 60,
-  60, 67, 69, 72, 71, 69, 67, 65,
-  64, 65, 67, 69, 67, 64, 62, 60,
-  67, 69, 71, 72, 74, 72, 71, 69,
-  60, 64, 67, 72, 67, 64, 62, 60,
-  60, 62, 64, 65, 67, 65, 64, 62
-];
-
 function weightedRandom(options) {
-  // simple smoothing: avoids overfitting
   let expanded = [];
-
   for (let i = 0; i < options.length; i++) {
     let weight = 1;
-
-    // slight preference for stability
-    if (i > 0 && options[i] === options[i - 1]) {
-      weight = 2;
-    }
-
-    for (let j = 0; j < weight; j++) {
-      expanded.push(options[i]);
-    }
+    if (i > 0 && options[i] === options[i - 1]) weight = 2;
+    for (let j = 0; j < weight; j++) expanded.push(options[i]);
   }
-
   return expanded[Math.floor(Math.random() * expanded.length)];
 }
 
@@ -87,6 +149,7 @@ function buildMarkov(seq, order) {
 }
 
 function generateMarkov(chain, order, length) {
+  if (Object.keys(chain).length === 0) return [];
   let keys = Object.keys(chain);
   let current = keys[Math.floor(Math.random() * keys.length)]
     .split(",").map(Number);
@@ -99,14 +162,11 @@ function generateMarkov(chain, order, length) {
 
     let next = weightedRandom(options);
 
-    // still audible but not chaotic
     if (Math.random() < 0.2) next += 12;
     if (Math.random() < 0.1) next -= 12;
-
     if (Math.random() < 0.08) next = null;
 
     result.push(next);
-
     current.shift();
     current.push(next || 60);
   }
@@ -114,15 +174,94 @@ function generateMarkov(chain, order, length) {
   return result;
 }
 
-let chain = buildMarkov(melodyData, 2);
-let melody = generateMarkov(chain, 2, 16);
+let chain = buildMarkov(melodyData, ORDER);
+let melody = generateMarkov(chain, ORDER, 16);
 
-// helpers
+// input
+document.getElementById("learn").onclick = () => {
+  let text = document.getElementById("inputNotes").value;
+
+  let newData = text
+    .split(/\s+/)
+    .map(n => parseInt(n))
+    .filter(n => !isNaN(n));
+
+  if (newData.length < 3) return;
+
+  melodyData = newData;
+  chain = buildMarkov(melodyData, ORDER);
+  melody = generateMarkov(chain, ORDER, 16);
+  step = 0;
+};
+
+// midi upload
+document.getElementById("midiFile").onchange = async (e) => {
+  let file = e.target.files[0];
+  if (!file) return;
+
+  let arrayBuffer = await file.arrayBuffer();
+
+  try {
+    let midi = new Midi(arrayBuffer);
+
+    let notes = [];
+
+    // extract all pitches
+    midi.tracks.forEach(track => {
+      track.notes.forEach(n => {
+        notes.push(n.midi);
+      });
+    });
+
+    if (notes.length < 5) {
+      alert("MIDI file too small or empty!");
+      return;
+    }
+
+    melodyData = notes;
+
+    chain = buildMarkov(melodyData, ORDER);
+    melody = generateMarkov(chain, ORDER, 32);
+
+    step = 0;
+
+  } catch (err) {
+    console.error(err);
+    alert("Error reading MIDI file");
+  }
+};
+
+// order
+document.getElementById("orderInput").onchange = (e) => {
+  let val = parseInt(e.target.value);
+
+  if (isNaN(val) || val < 1) return;
+
+  ORDER = val;
+
+  chain = buildMarkov(melodyData, ORDER);
+  melody = generateMarkov(chain, ORDER, 16);
+  step = 0;
+};
+
+
+// changing input for learning
+document.getElementById("inputMode").onchange = (e) => {
+  let mode = e.target.value;
+
+  document.getElementById("textInputArea").style.display =
+    mode === "text" ? "block" : "none";
+
+  document.getElementById("midiInputArea").style.display =
+    mode === "midi" ? "block" : "none";
+};
+
+
 function midiToFreq(n) {
   return Math.min(1000, 440 * Math.pow(2, (n - 69) / 12));
 }
 
-// lead
+// lead melody
 function playLead(note, time, cutoff) {
   if (note === null) return;
 
@@ -147,26 +286,6 @@ function playLead(note, time, cutoff) {
 
   osc.start(time);
   osc.stop(time + stepTime * 1.2);
-}
-
-// markov
-function playMarkovVoice(note, time) {
-  if (note === null) return;
-
-  let osc = ctx.createOscillator();
-  let gain = ctx.createGain();
-
-  osc.type = "triangle";
-  osc.frequency.value = midiToFreq(note);
-
-  gain.gain.setValueAtTime(0.18, time);
-  gain.gain.exponentialRampToValueAtTime(0.001, time + stepTime);
-
-  osc.connect(gain);
-  gain.connect(master);
-
-  osc.start(time);
-  osc.stop(time + stepTime);
 }
 
 // drums
@@ -213,36 +332,29 @@ function scheduler() {
   let now = ctx.currentTime;
 
   for (let i = 0; i < 4; i++) {
-
     let swing = (i % 2 === 1) ? SWING : 0;
     let t = now + i * stepTime + swing;
 
     let note = melody[(step + i) % melody.length];
 
     let cutoff = (mode === "build")
-      ? 300 + (step % 32) * 60 // slow rising filter (VERY audible build)
-      : 1000;
+      ? 200 + (step % 32) * 80
+      : 1200;
 
     playLead(note, t, cutoff);
-    playMarkovVoice(note, t);
 
-    if (mode === "drop") {
-      if ((step + i) % 2 === 0) kick(t);
-    }
+    if ((step + i) % 2 === 0) hihat(t);
 
-    if (mode === "build") {
-      if ((step + i) % 2 === 0) hihat(t);
-    } else {
-      if ((step + i) % 2 === 0) hihat(t);
+    if (mode === "drop" && (step + i) % 2 === 0) {
+      kick(t);
     }
   }
 
   step += 4;
-
   setTimeout(scheduler, stepTime * 1000 * 4);
 }
 
-// visualization
+//viz
 const canvas = document.getElementById("viz");
 const c = canvas.getContext("2d");
 
@@ -265,37 +377,33 @@ function draw() {
   c.strokeStyle="lime";
   c.stroke();
 
+  let state = melody.slice(step % melody.length, step % melody.length + ORDER);
+
   c.fillStyle="white";
   c.fillText("MODE: " + mode, 10, 20);
-  c.fillText("MARKOV ACTIVE", 10, 40);
+  c.fillText("ORDER: " + ORDER, 10, 40);
+  c.fillText("STATE: " + state.join(","), 10, 60);
+  c.fillText("CHAIN SIZE: " + Object.keys(chain).length, 10, 80);
 }
 draw();
 
 // controls
 document.getElementById("play").onclick = () => {
-  ctx.resume();
+  if (ctx.state === "suspended") ctx.resume();
   if (!running) {
     running = true;
     scheduler();
   }
 };
 
-document.getElementById("stop").onclick = () => {
-  running = false;
-};
-
-document.getElementById("build").onclick = () => {
-  mode = "build";
-};
-
-document.getElementById("drop").onclick = () => {
-  mode = "drop";
-};
+document.getElementById("stop").onclick = () => running = false;
+document.getElementById("build").onclick = () => mode = "build";
+document.getElementById("drop").onclick = () => mode = "drop";
 
 document.getElementById("regen").onclick = () => {
-  melody = generateMarkov(chain, 2, 16);
+  melody = generateMarkov(chain, ORDER, 16);
+  step = 0;
 };
-
 </script>
 </body>
 </html>
